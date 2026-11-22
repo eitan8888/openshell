@@ -56,13 +56,13 @@ use openshell_core::proto::{
     CreateSshSessionRequest, DeleteSandboxRequest, DeleteSandboxTemplateRequest,
     DeleteServiceRequest, DeletionOutcome, EndpointResult, EndpointStatus, ExecSandboxRequest,
     ExposeServiceRequest, GetCurrentUserRequest, GetDraftHistoryRequest, GetDraftPolicyRequest,
-    GetGatewayConfigRequest, GetSandboxConfigRequest, GetSandboxConfigResponse,
-    GetSandboxLogsRequest, GetSandboxPolicyStatusRequest, GetSandboxRequest,
-    GetSandboxTemplateRequest, GetServiceRequest, GpuResourceRequirements,
-    ListSandboxPoliciesRequest, ListSandboxTemplatesRequest, ListSandboxesRequest,
-    ListServicesRequest, PolicySource, PolicyStatus, RejectDraftChunkRequest, ResourceRequirements,
-    ResumeSandboxRequest, RevokeSshSessionRequest, Sandbox, SandboxCondition, SandboxPhase,
-    SandboxPolicy, SandboxResources, SandboxRestartPolicy, SandboxServiceExposure,
+    GetExecSandboxResultRequest, GetExecSandboxResultResponse, GetGatewayConfigRequest,
+    GetSandboxConfigRequest, GetSandboxConfigResponse, GetSandboxLogsRequest,
+    GetSandboxPolicyStatusRequest, GetSandboxRequest, GetSandboxTemplateRequest, GetServiceRequest,
+    GpuResourceRequirements, ListSandboxPoliciesRequest, ListSandboxTemplatesRequest,
+    ListSandboxesRequest, ListServicesRequest, PolicySource, PolicyStatus, RejectDraftChunkRequest,
+    ResourceRequirements, ResumeSandboxRequest, RevokeSshSessionRequest, Sandbox, SandboxCondition,
+    SandboxPhase, SandboxPolicy, SandboxResources, SandboxRestartPolicy, SandboxServiceExposure,
     SandboxServiceLevel, SandboxSpec, SandboxStartup, SandboxTemplate, SandboxWorkloadConfig,
     SandboxWorkloadTemplate, SandboxWorkloadTemplateSpec, ServiceAuthorizationMode,
     ServiceEndpointResponse, SettingScope, StartSandboxRequest, StopSandboxRequest,
@@ -2001,6 +2001,31 @@ fn piped_stdin_limit_error() -> miette::Report {
 /// Returns the remote command's exit code, or an error if the event stream
 /// closes before the command reports an exit status.
 #[allow(clippy::too_many_arguments, clippy::implicit_hasher)]
+fn verify_owned_exec_result(result: &GetExecSandboxResultResponse, request_id: &str) -> Result<()> {
+    if result.request_id != request_id
+        || result.claim_id.is_empty()
+        || result.resource_version == 0
+        || result.format_version != 1
+        || result.method != "ExecSandbox"
+        || result.original_scope.is_empty()
+        || result.original_workspace_id.is_empty()
+        || result.original_target_id.is_empty()
+        || result.original_workspace_id != result.effective_workspace_id
+        || result.original_target_id != result.effective_target_id
+        || result.original_payload_fingerprint.is_empty()
+        || result.original_payload_fingerprint != result.effective_payload_fingerprint
+        || result.fingerprint_key_id.is_empty()
+        || result.admitted_at_ms <= 0
+        || result.terminal_at_ms < result.admitted_at_ms
+        || result.expires_at_ms <= result.terminal_at_ms
+    {
+        return Err(miette::miette!(
+            "exec result binding is incomplete or transformed"
+        ));
+    }
+    Ok(())
+}
+
 pub async fn sandbox_exec_grpc(
     server: &str,
     name: &str,
@@ -2010,9 +2035,26 @@ pub async fn sandbox_exec_grpc(
     tty_override: Option<bool>,
     environment: &HashMap<String, String>,
     no_login_shell: bool,
+    request_id: Option<&str>,
+    result_only: bool,
     tls: &TlsOptions,
     workspace: &str,
 ) -> Result<i32> {
+    if let Some(id) = request_id {
+        let parsed = uuid::Uuid::parse_str(id)
+            .map_err(|_| miette::miette!("request_id must be a canonical nonzero UUID"))?;
+        if parsed.is_nil() || parsed.to_string() != id {
+            return Err(miette::miette!(
+                "request_id must be a canonical nonzero UUID"
+            ));
+        }
+        if tty_override != Some(false) {
+            return Err(miette::miette!("request_id requires --no-tty"));
+        }
+    }
+    if result_only && request_id.is_none() {
+        return Err(miette::miette!("result-only requires request_id"));
+    }
     let mut client = grpc_client(server, tls).await?;
 
     // Resolve sandbox name to id.
@@ -2030,6 +2072,66 @@ pub async fn sandbox_exec_grpc(
         .into_inner()
         .sandbox
         .ok_or_else(|| miette::miette!("sandbox not found"))?;
+
+    if result_only {
+        let original_request = ExecSandboxRequest {
+            request_id: request_id.unwrap_or_default().to_string(),
+            sandbox: name.to_string(),
+            workspace_scope: Some(openshell_core::proto::workspace_selector(
+                workspace.to_string(),
+            )),
+            command: command.to_vec(),
+            workdir: workdir.unwrap_or_default().to_string(),
+            environment: environment.clone(),
+            execution_timeout: proto_execution_timeout(timeout_seconds)?,
+            stdin: Vec::new(),
+            tty: false,
+            cols: 0,
+            rows: 0,
+            no_login_shell,
+        };
+        let read = GetExecSandboxResultRequest {
+            original_request: Some(original_request),
+        };
+        let retry = replica.is_some().then(|| read.clone());
+        let result = match (
+            client
+                .get_exec_sandbox_result(routed_to(read, replica.as_ref()))
+                .await,
+            retry,
+        ) {
+            (Err(status), Some(read)) if retry_unrouted(replica.as_ref(), &status) => {
+                client.get_exec_sandbox_result(read).await
+            }
+            (response, _) => response,
+        }
+        .into_diagnostic()?
+        .into_inner();
+        verify_owned_exec_result(&result, request_id.unwrap_or_default())?;
+        println!(
+            "{}",
+            serde_json::json!({
+                "request_id": result.request_id,
+                "claim_id": result.claim_id,
+                "resource_version": result.resource_version,
+                "format_version": result.format_version,
+                "method": result.method,
+                "original_scope": result.original_scope,
+                "original_workspace_id": result.original_workspace_id,
+                "original_target_id": result.original_target_id,
+                "effective_workspace_id": result.effective_workspace_id,
+                "effective_target_id": result.effective_target_id,
+                "original_payload_fingerprint": result.original_payload_fingerprint,
+                "effective_payload_fingerprint": result.effective_payload_fingerprint,
+                "fingerprint_key_id": result.fingerprint_key_id,
+                "admitted_at_ms": result.admitted_at_ms,
+                "terminal_at_ms": result.terminal_at_ms,
+                "expires_at_ms": result.expires_at_ms,
+                "exit_code": result.exit_code,
+            })
+        );
+        return Ok(0);
+    }
 
     // Verify the sandbox is ready before issuing the exec.
     if SandboxPhase::try_from(sandbox.phase()) != Ok(SandboxPhase::Ready) {
@@ -2067,6 +2169,11 @@ pub async fn sandbox_exec_grpc(
             PipedStdin::Open { prefix, rest } => (prefix, Some(rest)),
         }
     };
+    if request_id.is_some() && (!stdin_prefix.is_empty() || stdin_rest.is_some()) {
+        return Err(miette::miette!(
+            "durable exec requires empty, closed stdin; no command was started"
+        ));
+    }
 
     let (cols, rows) = if tty {
         local_terminal_size().unwrap_or((80, 24))
@@ -2074,7 +2181,7 @@ pub async fn sandbox_exec_grpc(
         (0, 0)
     };
     let mut request = ExecSandboxRequest {
-        request_id: String::new(),
+        request_id: request_id.unwrap_or_default().to_string(),
         sandbox: name.to_string(),
         workspace_scope: Some(openshell_core::proto::workspace_selector(
             workspace.to_string(),
@@ -2102,6 +2209,11 @@ pub async fn sandbox_exec_grpc(
         || stdin_rest.is_some()
         || request.encoded_len() > MAX_EXEC_REQUEST_BYTES
     {
+        if request_id.is_some() {
+            return Err(miette::miette!(
+                "durable exec requires the noninteractive unary RPC; no command was started"
+            ));
+        }
         return sandbox_exec_streaming_grpc(
             client,
             &sandbox,
@@ -7202,9 +7314,43 @@ mod tests {
         provisioning_blocker_message, provisioning_timeout_message, relay_local_socket,
         resolve_from, rootfs_tar_sources_supported_for_gateway, sandbox_should_persist,
         sandbox_upload_plan, service_endpoint_to_json, service_status_error,
-        service_url_for_gateway, workspace_member_to_json,
+        service_url_for_gateway, verify_owned_exec_result, workspace_member_to_json,
     };
-    use openshell_core::proto::TcpForwardFrame;
+    use openshell_core::proto::{GetExecSandboxResultResponse, TcpForwardFrame};
+
+    #[test]
+    fn owned_exec_result_requires_exact_untransformed_terminal_binding() {
+        let id = "22222222-2222-4222-8222-222222222222";
+        let mut result = GetExecSandboxResultResponse {
+            request_id: id.into(),
+            claim_id: "claim-1".into(),
+            resource_version: 2,
+            format_version: 1,
+            method: "ExecSandbox".into(),
+            original_scope: "workspace/sandbox".into(),
+            original_workspace_id: "workspace-1".into(),
+            original_target_id: "sandbox-1".into(),
+            effective_workspace_id: "workspace-1".into(),
+            effective_target_id: "sandbox-1".into(),
+            original_payload_fingerprint: "fingerprint".into(),
+            effective_payload_fingerprint: "fingerprint".into(),
+            fingerprint_key_id: "key-1".into(),
+            admitted_at_ms: 10,
+            terminal_at_ms: 11,
+            expires_at_ms: 12,
+            exit_code: 0,
+        };
+        assert!(verify_owned_exec_result(&result, id).is_ok());
+        assert!(verify_owned_exec_result(&result, "33333333-3333-4333-8333-333333333333").is_err());
+        result.effective_target_id = "foreign-sandbox".into();
+        assert!(verify_owned_exec_result(&result, id).is_err());
+        result.effective_target_id = result.original_target_id.clone();
+        result.effective_payload_fingerprint = "transformed".into();
+        assert!(verify_owned_exec_result(&result, id).is_err());
+        result.effective_payload_fingerprint = result.original_payload_fingerprint.clone();
+        result.terminal_at_ms = 0;
+        assert!(verify_owned_exec_result(&result, id).is_err());
+    }
 
     #[test]
     fn lifecycle_wait_fails_fast_on_phases_that_block_the_target() {
