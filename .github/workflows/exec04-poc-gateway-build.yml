@@ -1,0 +1,51 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+name: POC EXEC04 exact gateway build
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  gateway:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: eitan8888/openshell
+          ref: fd569f9eee06d5916842f3c7fa471614523f59d3
+          persist-credentials: false
+
+      - name: Verify reviewed source
+        shell: bash
+        run: test "$(git rev-parse HEAD)" = fd569f9eee06d5916842f3c7fa471614523f59d3
+
+      - uses: ./.github/actions/setup-nix
+        with:
+          prepare-shell: "true"
+
+      - uses: ./.github/actions/build-rust-binary
+        with:
+          package: openshell-gateway
+          binary: openshell-gateway
+          triple: x86_64-unknown-linux-gnu
+          cargo-version: 0.0.0
+          artifact-name: exec04-gateway-fd569f9-linux-amd64
+
+      - name: Record exact binary hash
+        shell: bash
+        run: |
+          printf 'source_commit=%s\n' "$(git rev-parse HEAD)" > exec04-gateway-build-receipt.txt
+          printf 'target=x86_64-unknown-linux-gnu\n' >> exec04-gateway-build-receipt.txt
+          sha256sum target/x86_64-unknown-linux-gnu/release/openshell-gateway >> exec04-gateway-build-receipt.txt
+          file target/x86_64-unknown-linux-gnu/release/openshell-gateway >> exec04-gateway-build-receipt.txt
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: exec04-gateway-fd569f9-build-receipt
+          path: exec04-gateway-build-receipt.txt
+          retention-days: 5
