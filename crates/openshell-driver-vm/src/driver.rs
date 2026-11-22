@@ -1989,22 +1989,21 @@ impl VmDriver {
             )
             .await?
         };
-        let workspace = match persisted_workspace {
-            Some(workspace) => workspace,
-            None => {
-                let mut workspace = self
-                    .config
-                    .resolve_workspace(image_plan.working_dir.as_deref())
-                    .map_err(Status::invalid_argument)?;
-                validate_vm_workspace_mounts(&driver_config.mounts, &workspace.root)?;
-                // Keep original image contents across restarts even for
-                // workspace files that have not been copied up.
-                if prepared_workspace_mode.is_some() {
-                    workspace.image_identity = Some(image_plan.image_identity.clone());
-                }
-                write_sandbox_workspace(&state_dir, &workspace).await?;
-                workspace
+        let workspace = if let Some(workspace) = persisted_workspace {
+            workspace
+        } else {
+            let mut workspace = self
+                .config
+                .resolve_workspace(image_plan.working_dir.as_deref())
+                .map_err(Status::invalid_argument)?;
+            validate_vm_workspace_mounts(&driver_config.mounts, &workspace.root)?;
+            // Keep original image contents across restarts even for
+            // workspace files that have not been copied up.
+            if prepared_workspace_mode.is_some() {
+                workspace.image_identity = Some(image_plan.image_identity.clone());
             }
+            write_sandbox_workspace(&state_dir, &workspace).await?;
+            workspace
         };
         let image_identity = image_plan.image_identity.clone();
         self.ensure_provisioning_active(&sandbox.id).await?;

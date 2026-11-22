@@ -31,7 +31,7 @@ pub enum SelinuxLabel {
 /// directory and by drivers whose workspace remains fixed.
 pub const DEFAULT_WORKSPACE_ROOT: &str = "/sandbox";
 
-/// Paths reserved by MicroVM guest initialization.
+/// Paths reserved by VM guest initialization.
 pub const VM_RESERVED_GUEST_PATHS: &[&str] = &[
     "/.openshell",
     "/.openshell-bootstrap",
@@ -135,7 +135,7 @@ pub fn resolve_oci_workspace_root(working_dir: &str) -> Result<String, String> {
     Ok(workspace_root)
 }
 
-/// Resolve an image-declared working directory for a MicroVM workload.
+/// Resolve a VM workload's image-declared working directory.
 pub fn resolve_vm_image_workspace_root(working_dir: &str) -> Result<String, String> {
     let root = resolve_oci_workspace_root(working_dir)?;
     for reserved in VM_RESERVED_GUEST_PATHS.iter().copied().chain(["/run"]) {
@@ -148,7 +148,7 @@ pub fn resolve_vm_image_workspace_root(working_dir: &str) -> Result<String, Stri
     Ok(root)
 }
 
-/// Resolve a MicroVM workspace that guest init will assign to the sandbox user.
+/// Resolve a VM workspace that guest init will assign to the sandbox user.
 pub fn resolve_vm_managed_workspace_root(root: &str) -> Result<String, String> {
     if root.is_empty() || root == "/" || root.contains(':') {
         return Err("VM workspace_root must be a non-root absolute path without ':'".to_string());
