@@ -1,0 +1,51 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+name: POC EXEC04 exact CLI build
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  cli:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: eitan8888/openshell
+          ref: 32d53327f1dbcbc401703b487fed2535c0d068ef
+          persist-credentials: false
+
+      - name: Verify reviewed source
+        shell: bash
+        run: test "$(git rev-parse HEAD)" = 32d53327f1dbcbc401703b487fed2535c0d068ef
+
+      - uses: ./.github/actions/setup-nix
+        with:
+          prepare-shell: "true"
+
+      - uses: ./.github/actions/build-rust-binary
+        with:
+          package: openshell-cli
+          binary: openshell
+          triple: x86_64-unknown-linux-gnu
+          cargo-version: 0.0.0
+          artifact-name: exec04-cli-32d5332-linux-amd64
+
+      - name: Record exact binary hash
+        shell: bash
+        run: |
+          printf 'source_commit=%s\n' "$(git rev-parse HEAD)" > exec04-cli-build-receipt.txt
+          printf 'target=x86_64-unknown-linux-gnu\n' >> exec04-cli-build-receipt.txt
+          sha256sum target/x86_64-unknown-linux-gnu/release/openshell >> exec04-cli-build-receipt.txt
+          file target/x86_64-unknown-linux-gnu/release/openshell >> exec04-cli-build-receipt.txt
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: exec04-cli-32d5332-build-receipt
+          path: exec04-cli-build-receipt.txt
+          retention-days: 5
