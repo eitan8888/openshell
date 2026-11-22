@@ -1830,6 +1830,16 @@ enum SandboxCommands {
         #[arg(long)]
         no_login_shell: bool,
 
+        /// Caller-owned canonical nonzero UUID for a durable noninteractive exec.
+        /// Requires --no-tty and empty stdin; never generates an ID.
+        #[arg(long, requires = "no_tty")]
+        request_id: Option<String>,
+
+        /// Read the confirmed result for the exact command and --request-id.
+        /// Does not launch or reattach the command.
+        #[arg(long, requires = "request_id")]
+        result_only: bool,
+
         /// Set a non-secret environment variable for the command.
         /// Do not use this option for API keys, tokens, or other secrets; attach
         /// a provider to the sandbox instead. Repeatable.
@@ -3832,6 +3842,8 @@ async fn run_async() -> Result<()> {
                             envs,
                             command,
                             no_login_shell,
+                            request_id,
+                            result_only,
                         } => {
                             let name =
                                 resolve_sandbox_name(name.or(sandbox), &ctx.name, &cli.workspace)?;
@@ -3853,6 +3865,8 @@ async fn run_async() -> Result<()> {
                                 tty_override,
                                 &env_map,
                                 no_login_shell,
+                                request_id.as_deref(),
+                                result_only,
                                 &tls,
                                 &cli.workspace,
                             )
